@@ -694,22 +694,22 @@ main :: proc() {
 	letters := utf8.string_to_runes(LETTERS_IN_FONT)
 	glyphs: []Glyph
 
-	PackRectType :: enum {
+	Pack_Rect_Type :: enum {
 		Texture,
 		Glyph,
 		Tile,
 		ShapesTexture,
 	}
 
-	PackRectItem :: struct {
-		type: PackRectType,
+	Pack_Rect_Item :: struct {
+		type: Pack_Rect_Type,
 		idx: int,
 		x: int,
 		y: int,
 	}
 
 	pack_rects: [dynamic]stbrp.Rect
-	pack_rects_items: [dynamic]PackRectItem
+	pack_rects_items: [dynamic]Pack_Rect_Item
 
 	if font_data, ok := os.read_entire_file(FONT_FILENAME); ok {
 		fi: stbtt.fontinfo
@@ -754,7 +754,7 @@ main :: proc() {
 					h = stbrp.Coord(h) + 2,
 				})
 
-				append(&pack_rects_items, PackRectItem {
+				append(&pack_rects_items, Pack_Rect_Item {
 					type = .Glyph,
 					idx = r_idx,
 				})
@@ -771,7 +771,7 @@ main :: proc() {
 			h = stbrp.Coord(t.source_size.y) + 1,
 		})
 
-		append(&pack_rects_items, PackRectItem {
+		append(&pack_rects_items, Pack_Rect_Item {
 			type = .Texture,
 			idx = idx,
 		})
@@ -816,7 +816,7 @@ main :: proc() {
 						h = TILE_SIZE+pad,
 					})
 
-					append(&pack_rects_items, PackRectItem {
+					append(&pack_rects_items, Pack_Rect_Item {
 						type = .Tile,
 						idx = idx,
 						x = x,
@@ -833,7 +833,7 @@ main :: proc() {
 		h = 11,
 	})
 
-	append(&pack_rects_items, PackRectItem {
+	append(&pack_rects_items, Pack_Rect_Item {
 		type = .ShapesTexture,
 	})
 
