@@ -1,0 +1,3 @@
+[submodule "aseprite"]
+	path = aseprite
+	url = https://github.com/YangMann/odin-aseprite
