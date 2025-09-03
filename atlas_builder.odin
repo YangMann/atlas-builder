@@ -37,11 +37,11 @@ import stbtt "vendor:stb/truetype"
 ATLAS_SIZE :: 512
 
 // Path to output final atlas PNG to
-ATLAS_PNG_OUTPUT_PATH :: "atlas.png"
+ATLAS_PNG_OUTPUT_PATH :: "../assets/atlas.png"
 
 // Path to output atlas Odin metadata file to. Compile this as part of your game to get metadata
 // about where in atlas your textures etc are.
-ATLAS_ODIN_OUTPUT_PATH :: "atlas.odin"
+ATLAS_ODIN_OUTPUT_PATH :: "engine/graphics/atlas.odin"
 
 // Set to false to not crop atlas after generation.
 ATLAS_CROP :: true
@@ -58,7 +58,7 @@ TILE_ADD_PADDING :: true
 PACKAGE_NAME :: "game"
 
 // The folder within which to look for textures
-TEXTURES_DIR :: "textures"
+TEXTURES_DIR :: "../assets/aseprite"
 
 // The letters to extract from the font
 LETTERS_IN_FONT :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890?!&.,_:[]-+"
