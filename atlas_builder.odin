@@ -1015,6 +1015,7 @@ main :: proc() {
 
 	fmt.fprintln(f, "Atlas_Texture :: struct {")
 	fmt.fprintln(f, "\trect: Rect,")
+	fmt.fprintln(f, "\tuvs: [4]f32,")
 	fmt.fprintln(
 		f,
 		"\t// These offsets tell you how much space there is between the rect and the edge of the original document.",
@@ -1044,12 +1045,16 @@ main :: proc() {
 	for r in atlas_textures {
 		fmt.fprintf(
 			f,
-			"\t.%s = {{ rect = {{%v, %v, %v, %v}}, offset_top = %v, offset_right = %v, offset_bottom = %v, offset_left = %v, document_size = {{%v, %v}}, duration = %f}},\n",
+			"\t.%s = {{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, offset_top = %v, offset_right = %v, offset_bottom = %v, offset_left = %v, document_size = {{%v, %v}}, duration = %f}},\n",
 			r.name,
 			r.rect.x,
 			r.rect.y,
 			r.rect.width,
 			r.rect.height,
+			cast(f32)r.rect.x / cast(f32)crop_size.x,
+			cast(f32)r.rect.y / cast(f32)crop_size.y,
+			cast(f32)(r.rect.x + r.rect.width) / cast(f32)crop_size.x,
+			cast(f32)(r.rect.y + r.rect.height) / cast(f32)crop_size.y,
 			r.offset_top,
 			r.offset_right,
 			r.offset_bottom,
