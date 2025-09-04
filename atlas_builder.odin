@@ -991,6 +991,7 @@ main :: proc() {
 	fmt.fprintln(f, "")
 
 	fmt.fprintf(f, "TEXTURE_ATLAS_FILENAME :: \"%s\"\n", ATLAS_PNG_OUTPUT_PATH)
+	fmt.fprintf(f, "TEXTURE_ATLAS_SIZE :: [2]int{{%v, %v}}\n", crop_size.x, crop_size.y)
 	fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
 	fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n\n", LETTERS_IN_FONT)
 
