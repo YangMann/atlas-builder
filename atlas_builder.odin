@@ -62,10 +62,10 @@ PACKAGE_NAME :: "graphics"
 TEXTURES_DIR :: "../assets/aseprite"
 
 // The letters to extract from the font
-LETTERS_IN_FONT :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890?!&.,_:[]-+"
+LETTERS_IN_FONT :: " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890?!&.,_:[]-+测试"
 
 // The font to extract letters from
-FONT_FILENAME :: "font.ttf"
+FONT_FILENAME :: "../assets/font.ttf"
 
 // The font size of letters extracted from font
 FONT_SIZE :: 32
@@ -1164,6 +1164,7 @@ main :: proc() {
 
 	fmt.fprintln(f, "Atlas_Glyph :: struct {")
 	fmt.fprintln(f, "\trect: Rect,")
+	fmt.fprintln(f, "\tuvs: [4]f32,")
 	fmt.fprintln(f, "\tvalue: rune,")
 	fmt.fprintln(f, "\toffset_x: int,")
 	fmt.fprintln(f, "\toffset_y: int,")
@@ -1176,11 +1177,15 @@ main :: proc() {
 	for ag in atlas_glyphs {
 		fmt.fprintf(
 			f,
-			"\t{{ rect = {{%v, %v, %v, %v}}, value = %q, offset_x = %v, offset_y = %v, advance_x = %v}},\n",
+			"\t{{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, value = %q, offset_x = %v, offset_y = %v, advance_x = %v}},\n",
 			ag.rect.x,
 			ag.rect.y,
 			ag.rect.width,
 			ag.rect.height,
+			cast(f32)ag.rect.x / cast(f32)crop_size.x,
+			cast(f32)ag.rect.y / cast(f32)crop_size.y,
+			cast(f32)(ag.rect.x + ag.rect.width) / cast(f32)crop_size.x,
+			cast(f32)(ag.rect.y + ag.rect.height) / cast(f32)crop_size.y,
 			ag.glyph.value,
 			ag.glyph.offset.x,
 			ag.glyph.offset.y,
