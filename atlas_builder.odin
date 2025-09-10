@@ -86,6 +86,10 @@ Color :: [4]u8
 // Note that types such as Atlas_Texture_Rect are internal types used during the
 // atlas generation. The types written into the atlas.odin file are similar but
 // may be slightly different, see the end of `main` where .odin file is written.
+Shapes_Texture_Rect :: struct {
+	rect: Rect,
+	size: Vec2i,
+}
 
 Atlas_Texture_Rect :: struct {
 	rect:          Rect,
@@ -367,7 +371,11 @@ load_tileset :: proc(filename: string) -> (Tileset, bool) {
 	return t, true
 }
 
-load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data, animations: ^[dynamic]Animation) {
+load_ase_texture_data :: proc(
+	filename: string,
+	textures: ^[dynamic]Texture_Data,
+	animations: ^[dynamic]Animation,
+) {
 	data, data_ok := os.read_entire_file(filename)
 
 	if !data_ok {
@@ -449,7 +457,11 @@ load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 			case ase.Tags_Chunk:
 				for tag in c {
 					a := Animation {
-						name           = fmt.tprint(base_name, strings.to_ada_case(tag.name), sep = "_"),
+						name           = fmt.tprint(
+							base_name,
+							strings.to_ada_case(tag.name),
+							sep = "_",
+						),
 						first_texture  = fmt.tprint(base_name, tag.from_frame, sep = ""),
 						last_texture   = fmt.tprint(base_name, tag.to_frame, sep = ""),
 						loop_direction = tag.loop_direction,
@@ -698,7 +710,16 @@ main :: proc() {
 
 			for r, r_idx in letters {
 				w, h, ox, oy: c.int
-				data := stbtt.GetCodepointBitmap(&fi, scale_factor, scale_factor, r, &w, &h, &ox, &oy)
+				data := stbtt.GetCodepointBitmap(
+					&fi,
+					scale_factor,
+					scale_factor,
+					r,
+					&w,
+					&h,
+					&ox,
+					&oy,
+				)
 				advance_x: c.int
 				stbtt.GetCodepointHMetrics(&fi, r, &advance_x, nil)
 
@@ -721,7 +742,11 @@ main :: proc() {
 
 				append(
 					&pack_rects,
-					stbrp.Rect{id = i32(len(pack_rects_items)), w = stbrp.Coord(w) + 2, h = stbrp.Coord(h) + 2},
+					stbrp.Rect {
+						id = i32(len(pack_rects_items)),
+						w = stbrp.Coord(w) + 2,
+						h = stbrp.Coord(h) + 2,
+					},
 				)
 
 				append(&pack_rects_items, Pack_Rect_Item{type = .Glyph, idx = r_idx})
@@ -779,10 +804,17 @@ main :: proc() {
 
 					append(
 						&pack_rects,
-						stbrp.Rect{id = i32(len(pack_rects_items)), w = TILE_SIZE + pad, h = TILE_SIZE + pad},
+						stbrp.Rect {
+							id = i32(len(pack_rects_items)),
+							w = TILE_SIZE + pad,
+							h = TILE_SIZE + pad,
+						},
 					)
 
-					append(&pack_rects_items, Pack_Rect_Item{type = .Tile, idx = idx, x = x, y = y})
+					append(
+						&pack_rects_items,
+						Pack_Rect_Item{type = .Tile, idx = idx, x = x, y = y},
+					)
 				}
 			}
 		}
@@ -987,7 +1019,10 @@ main :: proc() {
 	fmt.fprintln(f, "\tRect :: struct {")
 	fmt.fprintln(f, "\t\tx, y, width, height: int,")
 	fmt.fprintln(f, "\t}\n")
-	fmt.fprintln(f, "Just make sure you have something along those lines the same package as this file.\n*/")
+	fmt.fprintln(
+		f,
+		"Just make sure you have something along those lines the same package as this file.\n*/",
+	)
 	fmt.fprintln(f, "")
 
 	fmt.fprintf(f, "TEXTURE_ATLAS_FILENAME :: \"%s\"\n", ATLAS_PNG_OUTPUT_PATH)
@@ -995,15 +1030,26 @@ main :: proc() {
 	fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
 	fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n\n", LETTERS_IN_FONT)
 
-	fmt.fprintln(f, "// A generated square in the atlas you can use with rl.SetShapesTexture to make")
+	fmt.fprintln(
+		f,
+		"// A generated square in the atlas you can use with rl.SetShapesTexture to make",
+	)
 	fmt.fprintln(f, "// raylib shapes such as rl.DrawRectangleRec() use the atlas.")
 	fmt.fprintf(
 		f,
-		"SHAPES_TEXTURE_RECT :: Rect {{%v, %v, %v, %v}}\n\n",
+		"SHAPES_TEXTURE_RECT :: Rect {{%v, %v, %v, %v}}\n",
 		shapes_texture_rect.x,
 		shapes_texture_rect.y,
 		shapes_texture_rect.width,
 		shapes_texture_rect.height,
+	)
+	fmt.fprintf(
+		f,
+		"SHAPES_TEXTURE_UVS :: [4]f32{{%v, %v, %v, %v}}\n\n",
+		f32(shapes_texture_rect.x) / f32(crop_size.x),
+		f32(shapes_texture_rect.y) / f32(crop_size.y),
+		f32((shapes_texture_rect.x + shapes_texture_rect.width)) / f32(crop_size.x),
+		f32((shapes_texture_rect.y + shapes_texture_rect.height)) / f32(crop_size.y),
 	)
 
 	fmt.fprintln(f, "Texture_Name :: enum {")
@@ -1029,7 +1075,10 @@ main :: proc() {
 		f,
 		"\t// frames can have different offsets due to different amount of empty pixels around the frames.",
 	)
-	fmt.fprintln(f, "\t// In many cases you need to add {offset_left, offset_top} to your position. But if you are")
+	fmt.fprintln(
+		f,
+		"\t// In many cases you need to add {offset_left, offset_top} to your position. But if you are",
+	)
 	fmt.fprintln(f, "\t// flipping a texture, then you might need offset_bottom or offset_right.")
 	fmt.fprintln(f, "\toffset_top: f32,")
 	fmt.fprintln(f, "\toffset_right: f32,")
@@ -1196,5 +1245,9 @@ main :: proc() {
 	fmt.fprintln(f, "}")
 
 	run_time_ms := time.duration_milliseconds(time.diff(start_time, time.now()))
-	log.infof(ATLAS_PNG_OUTPUT_PATH + " and " + ATLAS_ODIN_OUTPUT_PATH + " created in %.2f ms", run_time_ms)
+	log.infof(
+		ATLAS_PNG_OUTPUT_PATH + " and " + ATLAS_ODIN_OUTPUT_PATH + " created in %.2f ms",
+		run_time_ms,
+	)
 }
+
