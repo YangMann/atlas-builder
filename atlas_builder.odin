@@ -49,7 +49,7 @@ ATLAS_CROP :: true
 
 // The NxN size of each tile (you can import tilesets by giving textures the prefix `tileset_`)
 // Note that the width and height of the tileset image must be multiple of TILE_SIZE.
-TILE_SIZE :: 8
+TILE_SIZE :: 16
 
 // Add padding to tiles by adding a pixel border around it and copying there.
 // This helps with bleeding when doing subpixel camera movements.
