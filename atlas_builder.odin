@@ -38,11 +38,11 @@ import stbtt "vendor:stb/truetype"
 ATLAS_SIZE :: 512
 
 // Path to output final atlas PNG to
-ATLAS_PNG_OUTPUT_PATH :: "../assets/atlas.png"
+ATLAS_PNG_OUTPUT_PATH :: "assets/atlas.png"
 
 // Path to output atlas Odin metadata file to. Compile this as part of your game to get metadata
 // about where in atlas your textures etc are.
-ATLAS_ODIN_OUTPUT_PATH :: "engine/graphics/atlas.odin"
+ATLAS_ODIN_OUTPUT_PATH :: "source/engine/graphics/atlas.odin"
 
 // Set to false to not crop atlas after generation.
 ATLAS_CROP :: true
@@ -59,13 +59,13 @@ TILE_ADD_PADDING :: true
 PACKAGE_NAME :: "graphics"
 
 // The folder within which to look for textures
-TEXTURES_DIR :: "../assets/aseprite"
+TEXTURES_DIR :: "assets/aseprite"
 
 // The letters to extract from the font
 LETTERS_IN_FONT :: " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890?!&.,_:[]-+测试"
 
 // The font to extract letters from
-FONT_FILENAME :: "../assets/font.ttf"
+FONT_FILENAME :: "assets/font.ttf"
 
 // The font size of letters extracted from font
 FONT_SIZE :: 32
@@ -1163,13 +1163,14 @@ main :: proc() {
 
 	fmt.fprintln(f, "}\n")
 
+	fmt.fprintfln(f, "Tile :: struct {{rect: Rect, uvs: [4]f32,}}")
 	for &t in tilesets {
 		w := t.pixels_size.x / TILE_SIZE
 		h := t.pixels_size.y / TILE_SIZE
 
 		fmt.fprintln(f, "// The rect inside the atlas where each tile has ended up.")
 		fmt.fprintfln(f, "// Index using %v[x][y].", t.name)
-		fmt.fprintfln(f, "%v := [%v][%v]Rect {{", t.name, w, h)
+		fmt.fprintfln(f, "%v := [%v][%v]Tile {{", t.name, w, h)
 
 		slice.sort_by(t.packed_rects[:], proc(i, j: Atlas_Tile_Rect) -> bool {
 			if i.coord.x == j.coord.x {
@@ -1194,12 +1195,16 @@ main :: proc() {
 
 			fmt.fprintf(
 				f,
-				"\t\t %v = {{%v, %v, %v, %v}},\n",
+				"\t\t %v = {{rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}}},\n",
 				p.coord.y,
 				p.rect.x,
 				p.rect.y,
 				p.rect.width,
 				p.rect.height,
+				cast(f32)p.rect.x / cast(f32)crop_size.x,
+				cast(f32)p.rect.y / cast(f32)crop_size.y,
+				cast(f32)(p.rect.x + p.rect.width) / cast(f32)crop_size.x,
+				cast(f32)(p.rect.y + p.rect.height) / cast(f32)crop_size.y,
 			)
 
 			if idx == len(t.packed_rects) - 1 {
