@@ -35,7 +35,7 @@ import stbtt "vendor:stb/truetype"
 // ---------------------
 
 // Size of atlas in NxN pixels. Note: The outputted atlas PNG is cropped to the visible pixels.
-ATLAS_SIZE :: 512
+ATLAS_SIZE :: 1024
 
 // Path to output final atlas PNG to
 ATLAS_PNG_OUTPUT_PATH :: "assets/atlas.png"
