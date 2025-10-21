@@ -675,48 +675,61 @@ load_ase_ui_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_D
 
 	base_name := asset_name(filename)
 
-	// 1. First, build a map of layer index to layer name for easy lookup.
-	layer_map := make(map[u16]ase.Layer_Chunk)
-	defer delete(layer_map)
+	full_layer_names := make(map[u16]string)
+	defer {for _, name in full_layer_names {delete(name)}; delete(full_layer_names)}
+
+	name_stack: [dynamic]string; defer delete(name_stack)
 	layer_index: u16 = 0
-	for f in doc.frames {
-		for &c in f.chunks {
+
+	// A single builder can be reused by resetting it.
+	full_name_builder: strings.Builder
+	strings.builder_init(&full_name_builder)
+	defer strings.builder_destroy(&full_name_builder)
+
+	if len(doc.frames) > 0 {
+		for &c in doc.frames[0].chunks {
 			#partial switch &c in c {
 			case ase.Layer_Chunk:
-				// Only consider visible layers that are not reference layers.
-				if ase.Layer_Chunk_Flag.Visiable in c.flags && ase.Layer_Chunk_Flag.Ref_Layer not_in c.flags {
-					layer_map[layer_index] = c
+				for len(name_stack) > int(c.child_level) {
+					pop(&name_stack)
 				}
+
+				// Only process visible, normal (image) layers for the final texture map.
+				if .Visiable in c.flags && .Ref_Layer not_in c.flags && c.type == .Normal {
+					strings.builder_reset(&full_name_builder) // Reset the builder for reuse.
+
+					for parent_name in name_stack {
+						fmt.sbprintf(&full_name_builder, "%s_", parent_name)
+					}
+					fmt.sbprintf(&full_name_builder, "%s", strings.to_ada_case(c.name))
+
+					// This creates a new, persistent string that is safe to store.
+					full_layer_names[layer_index] = strings.clone(strings.to_string(full_name_builder))
+				}
+
+				// If this is a group layer, push its name onto the stack for its children.
+				if c.type == .Group {
+					append(&name_stack, strings.to_ada_case(c.name))
+				}
+
 				layer_index += 1
 			}
 		}
-		// We only need to scan for layers once.
-		if len(layer_map) > 0 {
-			break
-		}
 	}
 
-	if len(layer_map) == 0 {
-		log.error("No visible layers found in UI document", filename)
-		return
+	if len(full_layer_names) == 0 {
+		log.warn("No visible, normal, non-reference layers found in UI document", filename)
 	}
 
-	// 2. Process each frame and create a texture for each layer's cel.
 	for f, frame_idx in doc.frames {
 		for &c in f.chunks {
 			#partial switch &c in c {
 			case ase.Cel_Chunk:
-				// Check if this cel belongs to one of our visible layers.
-				if layer_chunk, ok := layer_map[c.layer_index]; ok {
+				if layer_full_name, ok := full_layer_names[c.layer_index]; ok {
 					if cl, cel_ok := c.cel.(ase.Com_Image_Cel); cel_ok {
-						// We have a valid cel on a visible layer. Create a texture from it.
-
-						// The pixel data for this specific cel.
 						cel_pixels := slice.reinterpret([]Color, cl.pixels)
 
-						// The output name will be "Filename_LayerName".
-						// If the file is animated, it will be "Filename_LayerName_FrameIndex".
-						texture_name := fmt.tprintf("%s_%s", base_name, strings.to_ada_case(layer_chunk.name))
+						texture_name := fmt.tprintf("%s_%s", base_name, layer_full_name)
 						if len(doc.frames) > 1 {
 							texture_name = fmt.tprintf("%s_%v", texture_name, frame_idx)
 						}
@@ -727,7 +740,7 @@ load_ase_ui_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_D
 							pixels_size   = {int(cl.width), int(cl.height)},
 							source_size   = {int(cl.width), int(cl.height)},
 							document_size = {int(doc.header.width), int(doc.header.height)},
-							offset        = {int(c.x), int(c.y)}, // The cel's position is the offset.
+							offset        = {int(c.x), int(c.y)},
 							duration      = f32(f.header.duration) / 1000.0,
 						}
 						append(textures, td)
