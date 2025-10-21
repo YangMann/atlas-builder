@@ -34,8 +34,73 @@ import stbtt "vendor:stb/truetype"
 // CONFIGURATION OPTIONS
 // ---------------------
 
-// Size of atlas in NxN pixels. Note: The outputted atlas PNG is cropped to the visible pixels.
-ATLAS_SIZE :: 1024
+Atlas_Type :: enum {
+	Game,
+	UI,
+	Glyphs,
+}
+
+Atlas_Config :: struct {
+	type:                Atlas_Type,
+	name:                string, // e.g., "game", "ui", "font"
+	input_dir:           string,
+	input_file_prefix:   string, // e.g., "ui_"
+	process_subfolders:  bool,
+	size:                int, // 1024, 2048, etc
+	crop:                bool,
+	output_png_path:     string,
+	output_odin_path:    string,
+	output_odin_package: string,
+}
+
+Atlas_Build_Result :: struct {
+	config:       Atlas_Config,
+	textures:     [dynamic]Atlas_Texture_Rect,
+	animations:   [dynamic]Animation,
+	tilesets:     [dynamic]Tileset,
+	glyphs:       [dynamic]Atlas_Glyph,
+	shapes_rect:  Rect,
+	cropped_size: Vec2i,
+}
+
+ATLAS_CONFIGS := [?]Atlas_Config {
+	{
+		type                = .Game,
+		name                = "game",
+		input_dir           = "assets/aseprite/game",
+		input_file_prefix   = "", // No prefix needed, it processes everything in the folder
+		process_subfolders  = true,
+		size                = 1024,
+		crop                = true,
+		output_png_path     = "assets/atlas_game.png",
+		output_odin_path    = "source/engine/graphics/atlas_game.odin",
+		output_odin_package = "graphics",
+	},
+	{
+		type                = .UI,
+		name                = "ui",
+		input_dir           = "assets/aseprite/ui",
+		input_file_prefix   = "", // We'll just process the whole folder
+		process_subfolders  = false,
+		size                = 1024,
+		crop                = true,
+		output_png_path     = "assets/atlas_ui.png",
+		output_odin_path    = "source/engine/graphics/atlas_ui.odin",
+		output_odin_package = "graphics",
+	},
+	{
+		type                = .Glyphs,
+		name                = "glyphs",
+		input_dir           = "assets/fonts", // Or wherever your .ttf is
+		input_file_prefix   = "",
+		process_subfolders  = false,
+		size                = 1024,
+		crop                = true,
+		output_png_path     = "assets/atlas_font.png",
+		output_odin_path    = "source/engine/graphics/atlas_font.odin",
+		output_odin_package = "graphics",
+	},
+}
 
 // Path to output final atlas PNG to
 ATLAS_PNG_OUTPUT_PATH :: "assets/atlas.png"
@@ -43,9 +108,6 @@ ATLAS_PNG_OUTPUT_PATH :: "assets/atlas.png"
 // Path to output atlas Odin metadata file to. Compile this as part of your game to get metadata
 // about where in atlas your textures etc are.
 ATLAS_ODIN_OUTPUT_PATH :: "source/engine/graphics/atlas.odin"
-
-// Set to false to not crop atlas after generation.
-ATLAS_CROP :: true
 
 // The NxN size of each tile (you can import tilesets by giving textures the prefix `tileset_`)
 // Note that the width and height of the tileset image must be multiple of TILE_SIZE.
@@ -64,11 +126,8 @@ TEXTURES_DIR :: "assets/aseprite"
 // The letters to extract from the font
 LETTERS_IN_FONT :: " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890?!&.,_:[]-+测试"
 
-// The font to extract letters from
-FONT_FILENAME :: "assets/font.ttf"
-
 // The font size of letters extracted from font
-FONT_SIZE :: 32
+FONT_SIZE :: 24
 
 
 // ---------------------
@@ -371,11 +430,7 @@ load_tileset :: proc(filename: string) -> (Tileset, bool) {
 	return t, true
 }
 
-load_ase_texture_data :: proc(
-	filename: string,
-	textures: ^[dynamic]Texture_Data,
-	animations: ^[dynamic]Animation,
-) {
+load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data, animations: ^[dynamic]Animation) {
 	data, data_ok := os.read_entire_file(filename)
 
 	if !data_ok {
@@ -457,11 +512,7 @@ load_ase_texture_data :: proc(
 			case ase.Tags_Chunk:
 				for tag in c {
 					a := Animation {
-						name           = fmt.tprint(
-							base_name,
-							strings.to_ada_case(tag.name),
-							sep = "_",
-						),
+						name           = fmt.tprint(base_name, strings.to_ada_case(tag.name), sep = "_"),
 						first_texture  = fmt.tprint(base_name, tag.from_frame, sep = ""),
 						last_texture   = fmt.tprint(base_name, tag.to_frame, sep = ""),
 						loop_direction = tag.loop_direction,
@@ -607,155 +658,254 @@ load_png_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 	append(textures, td)
 }
 
-default_context: runtime.Context
+load_ase_ui_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data) {
+	data, data_ok := os.read_entire_file(filename)
+	if !data_ok {
+		return
+	}
+	defer delete(data)
 
-main :: proc() {
-	context.logger = log.create_console_logger(opt = {.Level})
-	default_context = context
-	start_time := time.now()
+	doc: ase.Document
+	umerr := ase.unmarshal(&doc, data[:])
+	if umerr != nil {
+		log.error("Aseprite unmarshal error", umerr)
+		return
+	}
+	defer ase.destroy_doc(&doc)
+
+	base_name := asset_name(filename)
+
+	// 1. First, build a map of layer index to layer name for easy lookup.
+	layer_map := make(map[u16]ase.Layer_Chunk)
+	defer delete(layer_map)
+	layer_index: u16 = 0
+	for f in doc.frames {
+		for &c in f.chunks {
+			#partial switch &c in c {
+			case ase.Layer_Chunk:
+				// Only consider visible layers that are not reference layers.
+				if ase.Layer_Chunk_Flag.Visiable in c.flags && ase.Layer_Chunk_Flag.Ref_Layer not_in c.flags {
+					layer_map[layer_index] = c
+				}
+				layer_index += 1
+			}
+		}
+		// We only need to scan for layers once.
+		if len(layer_map) > 0 {
+			break
+		}
+	}
+
+	if len(layer_map) == 0 {
+		log.error("No visible layers found in UI document", filename)
+		return
+	}
+
+	// 2. Process each frame and create a texture for each layer's cel.
+	for f, frame_idx in doc.frames {
+		for &c in f.chunks {
+			#partial switch &c in c {
+			case ase.Cel_Chunk:
+				// Check if this cel belongs to one of our visible layers.
+				if layer_chunk, ok := layer_map[c.layer_index]; ok {
+					if cl, cel_ok := c.cel.(ase.Com_Image_Cel); cel_ok {
+						// We have a valid cel on a visible layer. Create a texture from it.
+
+						// The pixel data for this specific cel.
+						cel_pixels := slice.reinterpret([]Color, cl.pixels)
+
+						// The output name will be "Filename_LayerName".
+						// If the file is animated, it will be "Filename_LayerName_FrameIndex".
+						texture_name := fmt.tprintf("%s_%s", base_name, strings.to_ada_case(layer_chunk.name))
+						if len(doc.frames) > 1 {
+							texture_name = fmt.tprintf("%s_%v", texture_name, frame_idx)
+						}
+
+						td := Texture_Data {
+							name          = texture_name,
+							pixels        = slice.clone(cel_pixels),
+							pixels_size   = {int(cl.width), int(cl.height)},
+							source_size   = {int(cl.width), int(cl.height)},
+							document_size = {int(doc.header.width), int(doc.header.height)},
+							offset        = {int(c.x), int(c.y)}, // The cel's position is the offset.
+							duration      = f32(f.header.duration) / 1000.0,
+						}
+						append(textures, td)
+					}
+				}
+			}
+		}
+	}
+}
+
+dir_path_to_file_infos :: proc(path: string) -> []os.File_Info {
+	d, derr := os.open(path, os.O_RDONLY)
+	if derr != nil {
+		log.panicf("No %s folder found", path)
+	}
+	defer os.close(d)
+
+	{
+		file_info, ferr := os.fstat(d)
+		defer os.file_info_delete(file_info)
+
+		if ferr != nil {
+			log.panic("stat failed")
+		}
+		if !file_info.is_dir {
+			log.panic("not a directory")
+		}
+	}
+
+	file_infos, _ := os.read_dir(d, -1)
+	return file_infos
+}
+
+build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
+	log.infof("--- Building Atlas Image: %s ---", config.name)
+
+	// --- 1. Load Assets based on config type ---
 	textures: [dynamic]Texture_Data
 	animations: [dynamic]Animation
-
-	dir_path_to_file_infos :: proc(path: string) -> []os.File_Info {
-		d, derr := os.open(path, os.O_RDONLY)
-		if derr != nil {
-			log.panicf("No %s folder found", path)
-		}
-		defer os.close(d)
-
-		{
-			file_info, ferr := os.fstat(d)
-			defer os.file_info_delete(file_info)
-
-			if ferr != nil {
-				log.panic("stat failed")
-			}
-			if !file_info.is_dir {
-				log.panic("not a directory")
-			}
-		}
-
-		file_infos, _ := os.read_dir(d, -1)
-		return file_infos
-	}
-
-	file_infos := dir_path_to_file_infos(TEXTURES_DIR)
-
-	slice.sort_by(file_infos, proc(i, j: os.File_Info) -> bool {
-		return time.diff(i.creation_time, j.creation_time) > 0
-	})
-
 	tilesets: [dynamic]Tileset
+	glyphs: []Glyph // This is temporary for font loading
 
-	for fi in file_infos {
-		is_ase := strings.has_suffix(fi.name, ".ase") || strings.has_suffix(fi.name, ".aseprite")
-		is_png := strings.has_suffix(fi.name, ".png")
-		if is_ase || is_png {
-			path := fmt.tprintf("%s/%s", TEXTURES_DIR, fi.name)
-			if strings.has_prefix(fi.name, "tileset") {
-				t: Tileset
-				t_ok: bool
-
-				if is_ase {
-					t, t_ok = load_tileset(path)
+	// (The asset loading logic is the same as your original file, but scoped to the config)
+	switch config.type {
+	case .Game:
+		file_infos := dir_path_to_file_infos(config.input_dir)
+		slice.sort_by(
+			file_infos,
+			proc(i, j: os.File_Info) -> bool {return time.diff(i.creation_time, j.creation_time) > 0},
+		)
+		for fi in file_infos {
+			is_ase := strings.has_suffix(fi.name, ".ase") || strings.has_suffix(fi.name, ".aseprite")
+			is_png := strings.has_suffix(fi.name, ".png")
+			if is_ase || is_png {
+				path := fmt.tprintf("%s/%s", config.input_dir, fi.name)
+				if strings.has_prefix(fi.name, "tileset") {
+					t: Tileset
+					t_ok: bool
+					if is_ase {
+						t, t_ok = load_tileset(path)
+					} else {
+						t, t_ok = load_png_tileset(path)
+					}
+					// t, t_ok := is_ase ? load_tileset(path) : load_png_tileset(path)
+					if t_ok {t.name = slashpath.name(fi.name); append(&tilesets, t)}
+				} else if is_ase {
+					load_ase_texture_data(path, &textures, &animations)
 				} else if is_png {
-					t, t_ok = load_png_tileset(path)
+					load_png_texture_data(path, &textures)
+				}
+			}
+		}
+	case .UI:
+		file_infos := dir_path_to_file_infos(config.input_dir)
+		for fi in file_infos {
+			if strings.has_suffix(fi.name, ".ase") || strings.has_suffix(fi.name, ".aseprite") {
+				path := fmt.tprintf("%s/%s", config.input_dir, fi.name)
+				load_ase_ui_texture_data(path, &textures)
+			}
+		}
+	case .Glyphs:
+		font_file_infos := dir_path_to_file_infos(config.input_dir)
+
+		font_datas: [dynamic][]u8; defer {for d in font_datas {delete(d)}}
+		font_infos: [dynamic]stbtt.fontinfo
+
+		for fi in font_file_infos {
+			if !strings.has_suffix(fi.name, ".ttf") {
+				continue
+			}
+
+			font_path := fmt.tprintf("%s/%s", config.input_dir, fi.name)
+			if data, ok := os.read_entire_file(font_path); ok {
+				append(&font_datas, data)
+
+				info: stbtt.fontinfo
+				if stbtt.InitFont(&info, raw_data(data), 0) {
+					append(&font_infos, info)
+					log.infof("Loaded font: %s", fi.name)
+				}
+			}
+		}
+
+		if len(font_infos) == 0 {
+			log.warnf("No .ttf files found in %s", config.input_dir)
+
+		} else {
+
+			letters := utf8.string_to_runes(LETTERS_IN_FONT)
+			glyphs = make([]Glyph, len(letters))
+
+			for r, r_idx in letters {
+				glyph_found_in_any_font := false
+
+				// Iterate through all loaded fonts to find one that has the glyph
+				for &fi in font_infos {
+					glyph_index := stbtt.FindGlyphIndex(&fi, r)
+					if glyph_index != 0 {
+						// Found a font with the glyph, render it and move to the next character
+						scale_factor := stbtt.ScaleForPixelHeight(&fi, FONT_SIZE)
+						ascent: c.int; stbtt.GetFontVMetrics(&fi, &ascent, nil, nil)
+
+						w, h, ox, oy: c.int
+						data := stbtt.GetCodepointBitmap(&fi, scale_factor, scale_factor, r, &w, &h, &ox, &oy)
+
+						advance_x: c.int
+						stbtt.GetCodepointHMetrics(&fi, r, &advance_x, nil)
+
+						rgba_data := make([]Color, w * h)
+						for i in 0 ..< w * h {rgba_data[i] = {255, 255, 255, data[i]}}
+
+						glyphs[r_idx] = {
+							image = {data = rgba_data, width = int(w), height = int(h)},
+							value = r,
+							offset = {int(ox), int(f32(oy) + f32(ascent) * scale_factor)},
+							advance_x = int(f32(advance_x) * scale_factor),
+						}
+
+						glyph_found_in_any_font = true
+						break // Exit the font search loop
+					}
 				}
 
-				if t_ok {
-					t.name = slashpath.name(fi.name)
-					append(&tilesets, t)
+				if !glyph_found_in_any_font {
+					log.warnf("Character '%c' (U+%04X) not found in any provided font.", r, r)
 				}
-			} else if is_ase {
-				load_ase_texture_data(path, &textures, &animations)
-			} else if is_png {
-				load_png_texture_data(path, &textures)
 			}
 		}
 	}
 
+	// --- 2. Pack Rects ---
+	// (This entire section is identical to your original file, using config.size)
 	rc: stbrp.Context
-	rc_nodes: [ATLAS_SIZE]stbrp.Node
-	stbrp.init_target(&rc, ATLAS_SIZE, ATLAS_SIZE, raw_data(rc_nodes[:]), ATLAS_SIZE)
-
-	letters := utf8.string_to_runes(LETTERS_IN_FONT)
-	glyphs: []Glyph
-
+	rc_nodes := make([]stbrp.Node, config.size); defer delete(rc_nodes)
+	stbrp.init_target(&rc, i32(config.size), i32(config.size), raw_data(rc_nodes[:]), i32(len(rc_nodes)))
 	Pack_Rect_Type :: enum {
 		Texture,
 		Glyph,
 		Tile,
 		ShapesTexture,
 	}
-
 	Pack_Rect_Item :: struct {
-		type: Pack_Rect_Type,
-		idx:  int,
-		x:    int,
-		y:    int,
+		type:      Pack_Rect_Type,
+		idx, x, y: int,
 	}
-
-	pack_rects: [dynamic]stbrp.Rect
-	pack_rects_items: [dynamic]Pack_Rect_Item
-
-	if font_data, ok := os.read_entire_file(FONT_FILENAME); ok {
-		fi: stbtt.fontinfo
-		if stbtt.InitFont(&fi, raw_data(font_data), 0) {
-			scale_factor := stbtt.ScaleForPixelHeight(&fi, FONT_SIZE)
-
-			ascent: c.int
-			stbtt.GetFontVMetrics(&fi, &ascent, nil, nil)
-
-			glyphs = make([]Glyph, len(letters))
-
-			for r, r_idx in letters {
-				w, h, ox, oy: c.int
-				data := stbtt.GetCodepointBitmap(
-					&fi,
-					scale_factor,
-					scale_factor,
-					r,
-					&w,
-					&h,
-					&ox,
-					&oy,
-				)
-				advance_x: c.int
-				stbtt.GetCodepointHMetrics(&fi, r, &advance_x, nil)
-
-				rgba_data := make([]Color, w * h)
-
-				for i in 0 ..< w * h {
-					a := data[i]
-					rgba_data[i].r = 255
-					rgba_data[i].g = 255
-					rgba_data[i].b = 255
-					rgba_data[i].a = a
-				}
-
-				glyphs[r_idx] = {
-					image = {data = rgba_data, width = int(w), height = int(h)},
-					value = r,
-					offset = {int(ox), int(f32(oy) + f32(ascent) * scale_factor)},
-					advance_x = int(f32(advance_x) * scale_factor),
-				}
-
-				append(
-					&pack_rects,
-					stbrp.Rect {
-						id = i32(len(pack_rects_items)),
-						w = stbrp.Coord(w) + 2,
-						h = stbrp.Coord(h) + 2,
-					},
-				)
-
-				append(&pack_rects_items, Pack_Rect_Item{type = .Glyph, idx = r_idx})
-			}
-		}
-	} else {
-		log.warnf("No %s file found", FONT_FILENAME)
+	pack_rects: [dynamic]stbrp.Rect; pack_rects_items: [dynamic]Pack_Rect_Item
+	for r, r_idx in glyphs {
+		// log.debugf("Glyph U+%04X size: %dx%d", r.value, r.image.width, r.image.height)
+		append(
+			&pack_rects,
+			stbrp.Rect {
+				id = i32(len(pack_rects_items)),
+				w = stbrp.Coord(r.image.width) + 2,
+				h = stbrp.Coord(r.image.height) + 2,
+			},
+		)
+		append(&pack_rects_items, Pack_Rect_Item{type = .Glyph, idx = r_idx})
 	}
-
 	for t, idx in textures {
 		append(
 			&pack_rects,
@@ -765,10 +915,8 @@ main :: proc() {
 				h = stbrp.Coord(t.source_size.y) + 1,
 			},
 		)
-
 		append(&pack_rects_items, Pack_Rect_Item{type = .Texture, idx = idx})
 	}
-
 	for &t, idx in tilesets {
 		if t.pixels_size.x != 0 && t.pixels_size.y != 0 {
 			h := t.pixels_size.y / TILE_SIZE
@@ -804,70 +952,50 @@ main :: proc() {
 
 					append(
 						&pack_rects,
-						stbrp.Rect {
-							id = i32(len(pack_rects_items)),
-							w = TILE_SIZE + pad,
-							h = TILE_SIZE + pad,
-						},
+						stbrp.Rect{id = i32(len(pack_rects_items)), w = TILE_SIZE + pad, h = TILE_SIZE + pad},
 					)
 
-					append(
-						&pack_rects_items,
-						Pack_Rect_Item{type = .Tile, idx = idx, x = x, y = y},
-					)
+					append(&pack_rects_items, Pack_Rect_Item{type = .Tile, idx = idx, x = x, y = y})
 				}
 			}
 		}
 	}
-
 	append(&pack_rects, stbrp.Rect{id = i32(len(pack_rects_items)), w = 11, h = 11})
-
 	append(&pack_rects_items, Pack_Rect_Item{type = .ShapesTexture})
-
-	assert(len(pack_rects) == len(pack_rects_items))
-
-	rect_pack_res := stbrp.pack_rects(&rc, raw_data(pack_rects), i32(len(pack_rects)))
-
-	if rect_pack_res != 1 {
-		log.error("Failed to pack some rects. ATLAS_SIZE too small?")
+	if stbrp.pack_rects(&rc, raw_data(pack_rects), i32(len(pack_rects))) != 1 {
+		log.errorf("Failed to pack some rects for atlas '%s'. Size of %d may be too small.", config.name, config.size)
 	}
 
-	atlas_pixels := make([]Color, ATLAS_SIZE * ATLAS_SIZE)
+	// --- 3. Draw Atlas Image & Collect Metadata ---
+	result: Atlas_Build_Result; result.config = config
+	result.animations = animations
+	result.tilesets = tilesets
+	atlas_pixels := make([]Color, config.size * config.size); defer delete(atlas_pixels)
 	atlas := Image {
 		data   = atlas_pixels,
-		width  = ATLAS_SIZE,
-		height = ATLAS_SIZE,
+		width  = config.size,
+		height = config.size,
 	}
-	atlas_textures: [dynamic]Atlas_Texture_Rect
-
-	atlas_glyphs: [dynamic]Atlas_Glyph
-	shapes_texture_rect: Rect
-
 	for rp in pack_rects {
 		item := pack_rects_items[rp.id]
 
 		switch item.type {
 		case .ShapesTexture:
-			shapes_texture_rect = Rect{int(rp.x), int(rp.y), 10, 10}
-			draw_image_rectangle(&atlas, shapes_texture_rect, {255, 255, 255, 255})
+			result.shapes_rect = Rect{int(rp.x), int(rp.y), 10, 10}
+			draw_image_rectangle(&atlas, result.shapes_rect, {255, 255, 255, 255})
 		case .Texture:
 			idx := item.idx
-
 			t := textures[idx]
-
 			t_img := Image {
 				data   = t.pixels,
 				width  = t.pixels_size.x,
 				height = t.pixels_size.y,
 			}
-
 			source := Rect{t.source_offset.x, t.source_offset.y, t.source_size.x, t.source_size.y}
 			draw_image(&atlas, t_img, source, {int(rp.x), int(rp.y)})
-
 			atlas_rect := Rect{int(rp.x), int(rp.y), source.width, source.height}
-			offset_right := t.document_size.x - (int(atlas_rect.width) + t.offset.x)
-			offset_bottom := t.document_size.y - (int(atlas_rect.height) + t.offset.y)
-
+			offset_right := t.document_size.x - (atlas_rect.width + t.offset.x)
+			offset_bottom := t.document_size.y - (atlas_rect.height + t.offset.y)
 			ar := Atlas_Texture_Rect {
 				rect          = atlas_rect,
 				size          = t.document_size,
@@ -878,381 +1006,342 @@ main :: proc() {
 				name          = t.name,
 				duration      = t.duration,
 			}
-
-			append(&atlas_textures, ar)
+			append(&result.textures, ar)
 		case .Glyph:
 			idx := item.idx
 			g := glyphs[idx]
 			img := g.image
-
 			source := Rect{0, 0, img.width, img.height}
 			dest := Rect{int(rp.x) + 1, int(rp.y) + 1, source.width, source.height}
-
-			draw_image(&atlas, img, source, {int(rp.x) + 1, int(rp.y) + 1})
-
+			draw_image(&atlas, img, source, {dest.x, dest.y})
 			ag := Atlas_Glyph {
 				rect  = dest,
 				glyph = g,
 			}
-
-			append(&atlas_glyphs, ag)
+			append(&result.glyphs, ag)
 		case .Tile:
 			ix, iy := item.x, item.y
-			tileset := &tilesets[item.idx]
-
+			tileset := &result.tilesets[item.idx]
 			x := TILE_SIZE * ix
 			y := TILE_SIZE * iy
-
 			top_left := -tileset.offset
-
 			t_img := Image {
 				data   = tileset.pixels,
 				width  = tileset.pixels_size.x,
 				height = tileset.pixels_size.y,
 			}
-
 			source := Rect{x + top_left.x, y + top_left.y, TILE_SIZE, TILE_SIZE}
 			offset := TILE_ADD_PADDING == true ? 1 : 0
 			dest := Rect{int(rp.x) + offset, int(rp.y) + offset, source.width, source.height}
-
-			draw_image(&atlas, t_img, source, {int(dest.x), int(dest.y)})
-
+			draw_image(&atlas, t_img, source, {dest.x, dest.y})
 			when TILE_ADD_PADDING {
 				ts :: TILE_SIZE
-				// Top
-				{
-					psource := Rect{source.x, source.y, ts, 1}
-
-					draw_image(&atlas, t_img, psource, {int(dest.x), int(dest.y - 1)})
-				}
-
-				// Bottom
-				{
-					psource := Rect{source.x, source.y + ts - 1, ts, 1}
-
-					draw_image(&atlas, t_img, psource, {int(dest.x), int(dest.y + ts)})
-				}
-
-				// Left
-				{
-					psource := Rect{source.x, source.y, 1, ts}
-
-					draw_image(&atlas, t_img, psource, {int(dest.x - 1), int(dest.y)})
-				}
-
-				// Right
-				{
-					psource := Rect{source.x + ts - 1, source.y, 1, ts}
-
-					draw_image(&atlas, t_img, psource, {int(dest.x + ts), int(dest.y)})
-				}
+				{psource := Rect{source.x, source.y, ts, 1}; draw_image(&atlas, t_img, psource, {dest.x, dest.y - 1})}
+				{psource := Rect{source.x, source.y + ts - 1, ts, 1}
+					draw_image(&atlas, t_img, psource, {dest.x, dest.y + ts})}
+				{psource := Rect{source.x, source.y, 1, ts}; draw_image(&atlas, t_img, psource, {dest.x - 1, dest.y})}
+				{psource := Rect{source.x + ts - 1, source.y, 1, ts}
+					draw_image(&atlas, t_img, psource, {dest.x + ts, dest.y})}
 			}
-
 			at := Atlas_Tile_Rect {
 				rect  = dest,
 				coord = {ix, iy},
 			}
-
 			append(&tileset.packed_rects, at)
 		}
 	}
 
-	crop_size := Vec2i{ATLAS_SIZE, ATLAS_SIZE}
-
-	if ATLAS_CROP {
+	// --- 4. Crop and Write PNG ---
+	// (This is the same, but uses config for paths and a local context for the callback)
+	result.cropped_size = {config.size, config.size}
+	if config.crop {
 		max_x, max_y: int
-
 		for c, ci in atlas_pixels {
-			x := ci % ATLAS_SIZE
-			y := ci / ATLAS_SIZE
-
+			x := ci % config.size
+			y := ci / config.size
 			if c != {} {
-				if x > max_x {
-					max_x = x
-				}
-
-				if y > max_y {
-					max_y = y
-				}
+				if x > max_x {max_x = x}
+				if y > max_y {max_y = y}
 			}
 		}
-
-		crop_size.x = max_x + 1
-		crop_size.y = max_y + 1
+		result.cropped_size.x = max_x + 1
+		result.cropped_size.y = max_y + 1
 	}
 
+	img_write_context := struct {
+		path: string,
+	}{config.output_png_path}
 	img_write :: proc "c" (ctx: rawptr, data: rawptr, size: c.int) {
 		context = default_context
-		dir := slashpath.dir(ATLAS_PNG_OUTPUT_PATH)
-		if dir != "" {
-			os.make_directory(dir)
-		}
-		os.write_entire_file(ATLAS_PNG_OUTPUT_PATH, slice.bytes_from_ptr(data, int(size)))
+		write_ctx := cast(^struct {
+			path: string,
+		})ctx
+		dir := slashpath.dir(write_ctx.path); if dir != "" {os.make_directory(dir)}
+		os.write_entire_file(write_ctx.path, slice.bytes_from_ptr(data, int(size)))
 	}
-
 	stbim.write_png_to_func(
 		img_write,
-		nil,
-		c.int(crop_size.x),
-		c.int(crop_size.y),
+		&img_write_context,
+		c.int(result.cropped_size.x),
+		c.int(result.cropped_size.y),
 		4,
 		raw_data(atlas_pixels),
-		ATLAS_SIZE * size_of(Color),
+		i32(config.size * size_of(Color)),
 	)
 
-	f, _ := os.open(ATLAS_ODIN_OUTPUT_PATH, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644)
+	log.infof("%s created.", config.output_png_path)
+	return result
+}
+
+write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
+	log.info("--- Writing Consolidated Atlas Odin File ---")
+
+	if len(results) == 0 {
+		return
+	}
+	output_path := ATLAS_ODIN_OUTPUT_PATH
+	package_name := PACKAGE_NAME
+
+	f, f_err := os.open(output_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644)
+	if f_err != nil {
+		log.errorf("Failed to open output file for writing: %s", output_path)
+		return
+	}
 	defer os.close(f)
 
+	// --- 1. Write Header and Common Structs ---
 	fmt.fprintln(f, "// This file is generated by running the atlas_builder.")
-	fmt.fprintf(f, "package %s\n", PACKAGE_NAME)
+	fmt.fprintf(f, "package %s\n\n", package_name)
+	fmt.fprintln(f, "// import \"core:slice\"")
 	fmt.fprintln(f, "")
-	fmt.fprintln(
-		f,
-		"/*\nNote: This file assumes the existence of a type Rect that defines a rectangle in the same package, it can defined as:\n",
-	)
-	fmt.fprintln(f, "\tRect :: rl.Rectangle\n")
-	fmt.fprintln(f, "or if you don't use raylib:\n")
-	fmt.fprintln(f, "\tRect :: struct {")
-	fmt.fprintln(f, "\t\tx, y, width, height: f32,")
-	fmt.fprintln(f, "\t}\n")
-	fmt.fprintln(f, "or if you want to use integers (or any other numeric type):\n")
-	fmt.fprintln(f, "\tRect :: struct {")
-	fmt.fprintln(f, "\t\tx, y, width, height: int,")
-	fmt.fprintln(f, "\t}\n")
-	fmt.fprintln(
-		f,
-		"Just make sure you have something along those lines the same package as this file.\n*/",
-	)
-	fmt.fprintln(f, "")
-
-	fmt.fprintf(f, "TEXTURE_ATLAS_FILENAME :: \"%s\"\n", ATLAS_PNG_OUTPUT_PATH)
-	fmt.fprintf(f, "TEXTURE_ATLAS_SIZE :: [2]int{{%v, %v}}\n", crop_size.x, crop_size.y)
-	fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
-	fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n\n", LETTERS_IN_FONT)
-
-	fmt.fprintln(
-		f,
-		"// A generated square in the atlas you can use with rl.SetShapesTexture to make",
-	)
-	fmt.fprintln(f, "// raylib shapes such as rl.DrawRectangleRec() use the atlas.")
-	fmt.fprintf(
-		f,
-		"SHAPES_TEXTURE_RECT :: Rect {{%v, %v, %v, %v}}\n",
-		shapes_texture_rect.x,
-		shapes_texture_rect.y,
-		shapes_texture_rect.width,
-		shapes_texture_rect.height,
-	)
-	fmt.fprintf(
-		f,
-		"SHAPES_TEXTURE_UVS :: [4]f32{{%v, %v, %v, %v}}\n\n",
-		f32(shapes_texture_rect.x) / f32(crop_size.x),
-		f32(shapes_texture_rect.y) / f32(crop_size.y),
-		f32((shapes_texture_rect.x + shapes_texture_rect.width)) / f32(crop_size.x),
-		f32((shapes_texture_rect.y + shapes_texture_rect.height)) / f32(crop_size.y),
-	)
-
-	fmt.fprintln(f, "Texture_Name :: enum {")
-	fmt.fprint(f, "\tNone,\n")
-	for r in atlas_textures {
-		fmt.fprintf(f, "\t%s,\n", r.name)
-	}
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
+	fmt.fprintln(f, "/*\nNote: This file assumes the existence of a type Rect... (rest of comment)\n*/\n")
 
 	fmt.fprintln(f, "Atlas_Texture :: struct {")
-	fmt.fprintln(f, "\trect: Rect,")
-	fmt.fprintln(f, "\tuvs: [4]f32,")
-	fmt.fprintln(
-		f,
-		"\t// These offsets tell you how much space there is between the rect and the edge of the original document.",
-	)
-	fmt.fprintln(
-		f,
-		"\t// The atlas is tightly packed, so empty pixels are removed. This can be especially apparent in animations where",
-	)
-	fmt.fprintln(
-		f,
-		"\t// frames can have different offsets due to different amount of empty pixels around the frames.",
-	)
-	fmt.fprintln(
-		f,
-		"\t// In many cases you need to add {offset_left, offset_top} to your position. But if you are",
-	)
-	fmt.fprintln(f, "\t// flipping a texture, then you might need offset_bottom or offset_right.")
-	fmt.fprintln(f, "\toffset_top: f32,")
-	fmt.fprintln(f, "\toffset_right: f32,")
+	fmt.fprintln(f, "\trect:          Rect,")
+	fmt.fprintln(f, "\tuvs:           [4]f32,")
+	fmt.fprintln(f, "\toffset_top:    f32,")
+	fmt.fprintln(f, "\toffset_right:  f32,")
 	fmt.fprintln(f, "\toffset_bottom: f32,")
-	fmt.fprintln(f, "\toffset_left: f32,")
+	fmt.fprintln(f, "\toffset_left:   f32,")
 	fmt.fprintln(f, "\tdocument_size: [2]f32,")
-	fmt.fprintln(f, "\tduration: f32,")
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
+	fmt.fprintln(f, "\tduration:      f32,")
+	fmt.fprintln(f, "}\n")
 
-	fmt.fprintln(f, "atlas_textures: [Texture_Name]Atlas_Texture = {")
-	fmt.fprintln(f, "\t.None = {},")
+	fmt.fprintln(f, "Tag_Loop_Dir :: enum { Forward, Reverse, Ping_Pong, Ping_Pong_Reverse }\n")
 
-	for r in atlas_textures {
-		fmt.fprintf(
+	// --- 2. Write Consolidated Enums ---
+	fmt.fprintln(f, "Texture_Name :: enum { None,")
+	for result in results {
+		for t in result.textures {
+			fmt.fprintf(f, "\t%s,\n", t.name)
+		}
+	}
+	fmt.fprintln(f, "}\n")
+
+	fmt.fprintln(f, "Animation_Name :: enum { None,")
+	for result in results {
+		for a in result.animations {
+			fmt.fprintf(f, "\t%s,\n", a.name)
+		}
+	}
+	fmt.fprintln(f, "}\n")
+
+	// --- 3. Write Structs that depend on Enums ---
+	fmt.fprintln(f, "Atlas_Animation :: struct {")
+	fmt.fprintln(f, "\tfirst_frame:     Texture_Name,")
+	fmt.fprintln(f, "\tlast_frame:      Texture_Name,")
+	fmt.fprintln(f, "\tdocument_size:   [2]f32,")
+	fmt.fprintln(f, "\tloop_direction:  Tag_Loop_Dir,")
+	fmt.fprintln(f, "\trepeat:          u16,")
+	fmt.fprintln(f, "}\n")
+
+	fmt.fprintfln(f, "Tile :: struct {{ rect: Rect, uvs: [4]f32 }}\n")
+
+	fmt.fprintln(f, "Atlas_Glyph :: struct {")
+	fmt.fprintln(f, "\trect:      Rect,")
+	fmt.fprintln(f, "\tuvs:       [4]f32,")
+	fmt.fprintln(f, "\tvalue:     rune,")
+	fmt.fprintln(f, "\toffset_x:  int,")
+	fmt.fprintln(f, "\toffset_y:  int,")
+	fmt.fprintln(f, "\tadvance_x: int,")
+	fmt.fprintln(f, "}\n")
+
+	// --- 4. Write Constants for each Atlas ---
+	for result in results {
+		atlas_name_upper := strings.to_upper(result.config.name)
+		cropped_size := result.cropped_size
+		shapes_rect := result.shapes_rect
+
+		fmt.fprintf(f, "// --- Atlas: %s ---\n", result.config.name)
+		fmt.fprintf(f, "%s_ATLAS_FILENAME :: \"%s\"\n", atlas_name_upper, result.config.output_png_path)
+		fmt.fprintfln(f, "%s_ATLAS_SIZE :: [2]int{{%v, %v}}", atlas_name_upper, cropped_size.x, cropped_size.y)
+
+		if result.config.type == .Glyphs {
+			fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
+			fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n", LETTERS_IN_FONT)
+		}
+
+		fmt.fprintfln(
 			f,
-			"\t.%s = {{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, offset_top = %v, offset_right = %v, offset_bottom = %v, offset_left = %v, document_size = {{%v, %v}}, duration = %f}},\n",
-			r.name,
-			r.rect.x,
-			r.rect.y,
-			r.rect.width,
-			r.rect.height,
-			cast(f32)r.rect.x / cast(f32)crop_size.x,
-			cast(f32)r.rect.y / cast(f32)crop_size.y,
-			cast(f32)(r.rect.x + r.rect.width) / cast(f32)crop_size.x,
-			cast(f32)(r.rect.y + r.rect.height) / cast(f32)crop_size.y,
-			r.offset_top,
-			r.offset_right,
-			r.offset_bottom,
-			r.offset_left,
-			r.size.x,
-			r.size.y,
-			r.duration,
+			"%s_SHAPES_TEXTURE_RECT :: Rect{{%v, %v, %v, %v}}",
+			atlas_name_upper,
+			shapes_rect.x,
+			shapes_rect.y,
+			shapes_rect.width,
+			shapes_rect.height,
+		)
+		fmt.fprintfln(
+			f,
+			"%s_SHAPES_TEXTURE_UVS :: [4]f32{{%v, %v, %v, %v}}\n",
+			atlas_name_upper,
+			f32(shapes_rect.x) / f32(cropped_size.x),
+			f32(shapes_rect.y) / f32(cropped_size.y),
+			f32(shapes_rect.x + shapes_rect.width) / f32(cropped_size.x),
+			f32(shapes_rect.y + shapes_rect.height) / f32(cropped_size.y),
 		)
 	}
 
-	fmt.fprintln(f, "}\n")
-
-	fmt.fprintln(f, "Animation_Name :: enum {")
-	fmt.fprint(f, "\tNone,\n")
-	for r in animations {
-		fmt.fprintf(f, "\t%s,\n", r.name)
+	// --- 5. Write Consolidated Maps ---
+	fmt.fprintln(f, "// --- Consolidated Maps ---")
+	fmt.fprintln(f, "atlas_textures := [Texture_Name]Atlas_Texture {")
+	fmt.fprintln(f, "\t.None = {},")
+	for result in results {
+		cropped_size := result.cropped_size
+		for t in result.textures {
+			fmt.fprintfln(
+				f,
+				"\t.%s = {{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, offset_top = %v, offset_right = %v, offset_bottom = %v, offset_left = %v, document_size = {{%v, %v}}, duration = %f}},",
+				t.name,
+				t.rect.x,
+				t.rect.y,
+				t.rect.width,
+				t.rect.height,
+				f32(t.rect.x) / f32(cropped_size.x),
+				f32(t.rect.y) / f32(cropped_size.y),
+				f32(t.rect.x + t.rect.width) / f32(cropped_size.x),
+				f32(t.rect.y + t.rect.height) / f32(cropped_size.y),
+				t.offset_top,
+				t.offset_right,
+				t.offset_bottom,
+				t.offset_left,
+				t.size.x,
+				t.size.y,
+				t.duration,
+			)
+		}
 	}
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
-
-	fmt.fprintln(f, "Tag_Loop_Dir :: enum {")
-	fmt.fprintln(f, "\tForward,")
-	fmt.fprintln(f, "\tReverse,")
-	fmt.fprintln(f, "\tPing_Pong,")
-	fmt.fprintln(f, "\tPing_Pong_Reverse,")
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
-
-	fmt.fprintln(f, "// Any aseprite file with frames will create new animations. Also, any tags")
-	fmt.fprintln(f, "// within the aseprite file will make that that into a separate animation.")
-	fmt.fprintln(f, "Atlas_Animation :: struct {")
-	fmt.fprintln(f, "\tfirst_frame: Texture_Name,")
-	fmt.fprintln(f, "\tlast_frame: Texture_Name,")
-	fmt.fprintln(f, "\tdocument_size: [2]f32,")
-	fmt.fprintln(f, "\tloop_direction: Tag_Loop_Dir,")
-	fmt.fprintln(f, "\trepeat: u16,")
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
+	fmt.fprintln(f, "}\n")
 
 	fmt.fprintln(f, "atlas_animations := [Animation_Name]Atlas_Animation {")
-	fmt.fprint(f, "\t.None = {},\n")
-
-	for a in animations {
-		fmt.fprintf(
-			f,
-			"\t.%v = {{ first_frame = .%v, last_frame = .%v, loop_direction = .%v, repeat = %v, document_size = {{%v, %v}} }},\n",
-			a.name,
-			a.first_texture,
-			a.last_texture,
-			a.loop_direction,
-			a.repeat,
-			a.document_size.x,
-			a.document_size.y,
-		)
+	fmt.fprintln(f, "\t.None = {},")
+	for result in results {
+		for a in result.animations {
+			fmt.fprintfln(
+				f,
+				"\t.%s = {{ first_frame = .%s, last_frame = .%s, loop_direction = .%s, repeat = %v, document_size = {{%v, %v}} }},",
+				a.name,
+				a.first_texture,
+				a.last_texture,
+				a.loop_direction,
+				a.repeat,
+				a.document_size.x,
+				a.document_size.y,
+			)
+		}
 	}
-
 	fmt.fprintln(f, "}\n")
 
-	fmt.fprintfln(f, "Tile :: struct {{rect: Rect, uvs: [4]f32,}}")
-	for &t in tilesets {
-		w := t.pixels_size.x / TILE_SIZE
-		h := t.pixels_size.y / TILE_SIZE
+	// --- 6. Write Tileset and Glyph Data ---
+	fmt.fprintln(f, "// --- Tilesets and Glyphs ---")
+	for result in results {
+		if len(result.tilesets) > 0 {
+			cropped_size := result.cropped_size
+			for t in result.tilesets {
+				w := t.pixels_size.x / TILE_SIZE
+				h := t.pixels_size.y / TILE_SIZE
+				map_name := fmt.tprintf("%s", t.name)
+				fmt.fprintfln(f, "// The rect inside the atlas where each tile has ended up.")
+				fmt.fprintfln(f, "// Index using %s[x][y].", map_name)
+				fmt.fprintfln(f, "%s := [%v][%v]Tile {{", map_name, w, h)
 
-		fmt.fprintln(f, "// The rect inside the atlas where each tile has ended up.")
-		fmt.fprintfln(f, "// Index using %v[x][y].", t.name)
-		fmt.fprintfln(f, "%v := [%v][%v]Tile {{", t.name, w, h)
+				slice.sort_by(t.packed_rects[:], proc(i, j: Atlas_Tile_Rect) -> bool {
+					if i.coord.x == j.coord.x {return i.coord.y < j.coord.y}
+					return i.coord.x < j.coord.x
+				})
 
-		slice.sort_by(t.packed_rects[:], proc(i, j: Atlas_Tile_Rect) -> bool {
-			if i.coord.x == j.coord.x {
-				return i.coord.y < j.coord.y
-			}
-
-			return i.coord.x < j.coord.x
-		})
-
-		prev_column := 0
-		for p, idx in t.packed_rects {
-			if idx == 0 {
-				fmt.fprint(f, "\t0 = {\n")
-			}
-
-			if p.coord.x != prev_column {
-				fmt.fprint(f, "\t},\n")
-				fmt.fprintf(f, "\t%v = {{\n", p.coord.x)
-			}
-
-			prev_column = p.coord.x
-
-			fmt.fprintf(
-				f,
-				"\t\t %v = {{rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}}},\n",
-				p.coord.y,
-				p.rect.x,
-				p.rect.y,
-				p.rect.width,
-				p.rect.height,
-				cast(f32)p.rect.x / cast(f32)crop_size.x,
-				cast(f32)p.rect.y / cast(f32)crop_size.y,
-				cast(f32)(p.rect.x + p.rect.width) / cast(f32)crop_size.x,
-				cast(f32)(p.rect.y + p.rect.height) / cast(f32)crop_size.y,
-			)
-
-			if idx == len(t.packed_rects) - 1 {
-				fmt.fprint(f, "\t},\n")
+				current_col := -1
+				for p in t.packed_rects {
+					if p.coord.x != current_col {
+						if current_col != -1 {fmt.fprint(f, "\t},\n")}
+						fmt.fprintfln(f, "\t%v = {{", p.coord.x)
+						current_col = p.coord.x
+					}
+					fmt.fprintfln(
+						f,
+						"\t\t%v = {{rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}}},",
+						p.coord.y,
+						p.rect.x,
+						p.rect.y,
+						p.rect.width,
+						p.rect.height,
+						f32(p.rect.x) / f32(cropped_size.x),
+						f32(p.rect.y) / f32(cropped_size.y),
+						f32(p.rect.x + p.rect.width) / f32(cropped_size.x),
+						f32(p.rect.y + p.rect.height) / f32(cropped_size.y),
+					)
+				}
+				if len(t.packed_rects) > 0 {
+					fmt.fprint(f, "\t},\n")
+				}
+				fmt.fprintln(f, "}\n")
 			}
 		}
 
-		fmt.fprintln(f, "}\n")
+		if len(result.glyphs) > 0 {
+			fmt.fprintln(f, "atlas_glyphs: []Atlas_Glyph = {")
+			for g in result.glyphs {
+				fmt.fprintfln(
+					f,
+					"\t{{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, value = %q, offset_x = %v, offset_y = %v, advance_x = %v}},",
+					g.rect.x,
+					g.rect.y,
+					g.rect.width,
+					g.rect.height,
+					f32(g.rect.x) / f32(result.cropped_size.x),
+					f32(g.rect.y) / f32(result.cropped_size.y),
+					f32(g.rect.x + g.rect.width) / f32(result.cropped_size.x),
+					f32(g.rect.y + g.rect.height) / f32(result.cropped_size.y),
+					g.glyph.value,
+					g.glyph.offset.x,
+					g.glyph.offset.y,
+					g.glyph.advance_x,
+				)
+			}
+			fmt.fprintln(f, "}\n")
+		}
 	}
 
-
-	fmt.fprintln(f, "Atlas_Glyph :: struct {")
-	fmt.fprintln(f, "\trect: Rect,")
-	fmt.fprintln(f, "\tuvs: [4]f32,")
-	fmt.fprintln(f, "\tvalue: rune,")
-	fmt.fprintln(f, "\toffset_x: int,")
-	fmt.fprintln(f, "\toffset_y: int,")
-	fmt.fprintln(f, "\tadvance_x: int,")
-	fmt.fprintln(f, "}")
-	fmt.fprintln(f, "")
-
-	fmt.fprintln(f, "atlas_glyphs: []Atlas_Glyph = {")
-
-	for ag in atlas_glyphs {
-		fmt.fprintf(
-			f,
-			"\t{{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, value = %q, offset_x = %v, offset_y = %v, advance_x = %v}},\n",
-			ag.rect.x,
-			ag.rect.y,
-			ag.rect.width,
-			ag.rect.height,
-			cast(f32)ag.rect.x / cast(f32)crop_size.x,
-			cast(f32)ag.rect.y / cast(f32)crop_size.y,
-			cast(f32)(ag.rect.x + ag.rect.width) / cast(f32)crop_size.x,
-			cast(f32)(ag.rect.y + ag.rect.height) / cast(f32)crop_size.y,
-			ag.glyph.value,
-			ag.glyph.offset.x,
-			ag.glyph.offset.y,
-			ag.glyph.advance_x,
-		)
-	}
-
-	fmt.fprintln(f, "}")
-
-	run_time_ms := time.duration_milliseconds(time.diff(start_time, time.now()))
-	log.infof(
-		ATLAS_PNG_OUTPUT_PATH + " and " + ATLAS_ODIN_OUTPUT_PATH + " created in %.2f ms",
-		run_time_ms,
-	)
+	log.infof("%s created.", output_path)
 }
 
+default_context: runtime.Context
+
+main :: proc() {
+	context.logger = log.create_console_logger(opt = {.Level})
+	default_context = context
+	start_time := time.now()
+
+	// 1. Build all atlas images and collect their metadata
+	results: [dynamic]Atlas_Build_Result
+	defer delete(results)
+	for config in ATLAS_CONFIGS {
+		result := build_atlas_image(config)
+		append(&results, result)
+	}
+
+	// 2. Write a single Odin file containing all collected metadata
+	write_consolidated_odin_file(results[:])
+
+	run_time_ms := time.duration_milliseconds(time.diff(start_time, time.now()))
+	log.infof(ATLAS_PNG_OUTPUT_PATH + " and " + ATLAS_ODIN_OUTPUT_PATH + " created in %.2f ms", run_time_ms)
+}
