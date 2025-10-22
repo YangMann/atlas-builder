@@ -15,20 +15,23 @@ package atlas_builder
 
 import "base:runtime"
 import "core:c"
+import "core:encoding/json"
 import "core:fmt"
 import "core:image/png"
 import "core:log"
 import "core:os"
 import "core:path/slashpath"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "core:unicode/utf8"
+import "vendor:glfw"
 
 import ase "aseprite"
 import stbim "vendor:stb/image"
 import stbrp "vendor:stb/rect_pack"
-import stbtt "vendor:stb/truetype"
+// import stbtt "vendor:stb/truetype"
 
 // ---------------------
 // CONFIGURATION OPTIONS
@@ -49,8 +52,6 @@ Atlas_Config :: struct {
 	size:                int, // 1024, 2048, etc
 	crop:                bool,
 	output_png_path:     string,
-	output_odin_path:    string,
-	output_odin_package: string,
 }
 
 Atlas_Build_Result :: struct {
@@ -58,7 +59,8 @@ Atlas_Build_Result :: struct {
 	textures:     [dynamic]Atlas_Texture_Rect,
 	animations:   [dynamic]Animation,
 	tilesets:     [dynamic]Tileset,
-	glyphs:       [dynamic]Atlas_Glyph,
+	// glyphs:       [dynamic]Atlas_Glyph,
+	msdf_data:    MSDF_JSON_Root,
 	shapes_rect:  Rect,
 	cropped_size: Vec2i,
 }
@@ -73,8 +75,6 @@ ATLAS_CONFIGS := [?]Atlas_Config {
 		size                = 1024,
 		crop                = true,
 		output_png_path     = "assets/atlas_game.png",
-		output_odin_path    = "source/engine/graphics/atlas_game.odin",
-		output_odin_package = "graphics",
 	},
 	{
 		type                = .UI,
@@ -85,8 +85,6 @@ ATLAS_CONFIGS := [?]Atlas_Config {
 		size                = 1024,
 		crop                = true,
 		output_png_path     = "assets/atlas_ui.png",
-		output_odin_path    = "source/engine/graphics/atlas_ui.odin",
-		output_odin_package = "graphics",
 	},
 	{
 		type                = .Glyphs,
@@ -96,9 +94,7 @@ ATLAS_CONFIGS := [?]Atlas_Config {
 		process_subfolders  = false,
 		size                = 1024,
 		crop                = true,
-		output_png_path     = "assets/atlas_font.png",
-		output_odin_path    = "source/engine/graphics/atlas_font.odin",
-		output_odin_package = "graphics",
+		output_png_path     = "assets/atlas_msdf_font.png",
 	},
 }
 
@@ -166,16 +162,60 @@ Atlas_Tile_Rect :: struct {
 	coord: Vec2i,
 }
 
-Glyph :: struct {
-	value:     rune,
-	image:     Image,
-	offset:    Vec2i,
-	advance_x: int,
-}
+// Glyph :: struct {
+// 	value:     rune,
+// 	image:     Image,
+// 	offset:    Vec2i,
+// 	advance_x: int,
+// }
 
-Atlas_Glyph :: struct {
-	rect:  Rect,
-	glyph: Glyph,
+// Atlas_Glyph :: struct {
+// 	rect:  Rect,
+// 	glyph: Glyph,
+// }
+
+MSDF_Atlas_Metrics :: struct {
+	type:           string,
+	distance_range: int `json:"distanceRange"`,
+	size:           int,
+	width:          int,
+	height:         int,
+	y_origin:       string `json:"yOrigin"`,
+}
+MSDF_Font_Metrics :: struct {
+	em_size:             f32 `json:"emSize"`,
+	line_height:         f32 `json:"lineHeight"`,
+	ascender:            f32,
+	descender:           f32,
+	underline_y:         f32 `json:"underlineY"`,
+	underline_thickness: f32 `json:"underlineThickness"`,
+}
+MSDF_Glyph_Metrics :: struct {
+	unicode:      int,
+	advance:      f32,
+	plane_bounds: struct {
+		left:   f32,
+		bottom: f32,
+		right:  f32,
+		top:    f32,
+	} `json:"planeBounds"`,
+	atlas_bounds: struct {
+		left:   f32,
+		bottom: f32,
+		right:  f32,
+		top:    f32,
+	} `json:"atlasBounds"`,
+}
+MSDF_Kerning_Pair :: struct {
+	unicode1: int,
+	unicode2: int,
+	advance:  f32,
+}
+MSDF_JSON_Root :: struct {
+	atlas:   MSDF_Atlas_Metrics,
+	metrics: MSDF_Font_Metrics,
+	glyphs:  []MSDF_Glyph_Metrics,
+	kerning: []MSDF_Kerning_Pair,
 }
 
 Texture_Data :: struct {
@@ -776,12 +816,13 @@ dir_path_to_file_infos :: proc(path: string) -> []os.File_Info {
 
 build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
 	log.infof("--- Building Atlas Image: %s ---", config.name)
+	result: Atlas_Build_Result; result.config = config
 
 	// --- 1. Load Assets based on config type ---
 	textures: [dynamic]Texture_Data
 	animations: [dynamic]Animation
 	tilesets: [dynamic]Tileset
-	glyphs: []Glyph // This is temporary for font loading
+	// glyphs: []Glyph // This is temporary for font loading
 
 	// (The asset loading logic is the same as your original file, but scoped to the config)
 	switch config.type {
@@ -822,73 +863,36 @@ build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
 			}
 		}
 	case .Glyphs:
-		font_file_infos := dir_path_to_file_infos(config.input_dir)
+		log.info("Reading MSDF font data from assets/atlas_msdf_font.json")
+		json_path := "assets/atlas_msdf_font.json"
+		json_data, json_ok := os.read_entire_file(json_path)
+		if !json_ok {
+			log.errorf("Could not read '%s'. Make sure build.py has run successfully.", json_path)
+			return result
+		}
+		defer delete(json_data)
 
-		font_datas: [dynamic][]u8; defer {for d in font_datas {delete(d)}}
-		font_infos: [dynamic]stbtt.fontinfo
-
-		for fi in font_file_infos {
-			if !strings.has_suffix(fi.name, ".ttf") {
-				continue
-			}
-
-			font_path := fmt.tprintf("%s/%s", config.input_dir, fi.name)
-			if data, ok := os.read_entire_file(font_path); ok {
-				append(&font_datas, data)
-
-				info: stbtt.fontinfo
-				if stbtt.InitFont(&info, raw_data(data), 0) {
-					append(&font_infos, info)
-					log.infof("Loaded font: %s", fi.name)
-				}
-			}
+		// Allocate on the heap so the pointer remains valid after this function returns
+		msdf_root := MSDF_JSON_Root{}
+		err := json.unmarshal(json_data, &msdf_root)
+		if err != nil {
+			log.errorf("Failed to parse MSDF JSON from '%s': %v", json_path, err)
+			// delete(msdf_root)
+			return result
 		}
 
-		if len(font_infos) == 0 {
-			log.warnf("No .ttf files found in %s", config.input_dir)
+		result.msdf_data = msdf_root
+		log.infof(
+			"Processed %d glyphs and %d kerning pairs from MSDF atlas.",
+			len(msdf_root.glyphs),
+			len(msdf_root.kerning),
+		)
 
-		} else {
+		// Set cropped size from the atlas data itself
+		result.cropped_size = {msdf_root.atlas.width, msdf_root.atlas.height}
 
-			letters := utf8.string_to_runes(LETTERS_IN_FONT)
-			glyphs = make([]Glyph, len(letters))
-
-			for r, r_idx in letters {
-				glyph_found_in_any_font := false
-
-				// Iterate through all loaded fonts to find one that has the glyph
-				for &fi in font_infos {
-					glyph_index := stbtt.FindGlyphIndex(&fi, r)
-					if glyph_index != 0 {
-						// Found a font with the glyph, render it and move to the next character
-						scale_factor := stbtt.ScaleForPixelHeight(&fi, FONT_SIZE)
-						ascent: c.int; stbtt.GetFontVMetrics(&fi, &ascent, nil, nil)
-
-						w, h, ox, oy: c.int
-						data := stbtt.GetCodepointBitmap(&fi, scale_factor, scale_factor, r, &w, &h, &ox, &oy)
-
-						advance_x: c.int
-						stbtt.GetCodepointHMetrics(&fi, r, &advance_x, nil)
-
-						rgba_data := make([]Color, w * h)
-						for i in 0 ..< w * h {rgba_data[i] = {255, 255, 255, data[i]}}
-
-						glyphs[r_idx] = {
-							image = {data = rgba_data, width = int(w), height = int(h)},
-							value = r,
-							offset = {int(ox), int(f32(oy) + f32(ascent) * scale_factor)},
-							advance_x = int(f32(advance_x) * scale_factor),
-						}
-
-						glyph_found_in_any_font = true
-						break // Exit the font search loop
-					}
-				}
-
-				if !glyph_found_in_any_font {
-					log.warnf("Character '%c' (U+%04X) not found in any provided font.", r, r)
-				}
-			}
-		}
+		// Return immediately, skipping the rect packing and drawing stages.
+		return result
 	}
 
 	// --- 2. Pack Rects ---
@@ -907,18 +911,7 @@ build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
 		idx, x, y: int,
 	}
 	pack_rects: [dynamic]stbrp.Rect; pack_rects_items: [dynamic]Pack_Rect_Item
-	for r, r_idx in glyphs {
-		// log.debugf("Glyph U+%04X size: %dx%d", r.value, r.image.width, r.image.height)
-		append(
-			&pack_rects,
-			stbrp.Rect {
-				id = i32(len(pack_rects_items)),
-				w = stbrp.Coord(r.image.width) + 2,
-				h = stbrp.Coord(r.image.height) + 2,
-			},
-		)
-		append(&pack_rects_items, Pack_Rect_Item{type = .Glyph, idx = r_idx})
-	}
+
 	for t, idx in textures {
 		append(
 			&pack_rects,
@@ -980,7 +973,6 @@ build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
 	}
 
 	// --- 3. Draw Atlas Image & Collect Metadata ---
-	result: Atlas_Build_Result; result.config = config
 	result.animations = animations
 	result.tilesets = tilesets
 	atlas_pixels := make([]Color, config.size * config.size); defer delete(atlas_pixels)
@@ -1021,17 +1013,7 @@ build_atlas_image :: proc(config: Atlas_Config) -> Atlas_Build_Result {
 			}
 			append(&result.textures, ar)
 		case .Glyph:
-			idx := item.idx
-			g := glyphs[idx]
-			img := g.image
-			source := Rect{0, 0, img.width, img.height}
-			dest := Rect{int(rp.x) + 1, int(rp.y) + 1, source.width, source.height}
-			draw_image(&atlas, img, source, {dest.x, dest.y})
-			ag := Atlas_Glyph {
-				rect  = dest,
-				glyph = g,
-			}
-			append(&result.glyphs, ag)
+
 		case .Tile:
 			ix, iy := item.x, item.y
 			tileset := &result.tilesets[item.idx]
@@ -1129,7 +1111,10 @@ write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
 	fmt.fprintln(f, "import \"../data\"")
 	fmt.fprintln(f, "Rect :: data.Rect")
 	fmt.fprintln(f, "")
-	fmt.fprintln(f, "/*\nNote: This file assumes the existence of a type Rect that defines a rectangle in the same package, it can defined as:\n")
+	fmt.fprintln(
+		f,
+		"/*\nNote: This file assumes the existence of a type Rect that defines a rectangle in the same package, it can defined as:\n",
+	)
 	fmt.fprintln(f, "\tRect :: rl.Rectangle\n")
 	fmt.fprintln(f, "or if you don't use raylib:\n")
 	fmt.fprintln(f, "\tRect :: struct {")
@@ -1182,6 +1167,22 @@ write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
 	fmt.fprintln(f, "}\n")
 
 	fmt.fprintfln(f, "Tile :: struct {{ rect: Rect, uvs: [4]f32 }}\n")
+	fmt.fprintln(f, "// --- MSDF Font Data Structures ---")
+	fmt.fprintln(f, "MSDF_Bounds :: struct { left, bottom, right, top: f32 }")
+	fmt.fprintln(
+		f,
+		"MSDF_Atlas_Metrics :: struct { type: string, distance_range: int, size: f32, width, height: int, y_origin: string }",
+	)
+	fmt.fprintln(
+		f,
+		"MSDF_Font_Metrics :: struct { em_size, line_height, ascender, descender, underline_y, underline_thickness: f32 }",
+	)
+	fmt.fprintln(
+		f,
+		"MSDF_Glyph_Metrics :: struct { unicode: rune, advance: f32, plane_bounds, atlas_bounds: MSDF_Bounds }",
+	)
+	fmt.fprintln(f, "MSDF_Kerning_Pair :: struct { unicode1, unicode2: rune, advance: f32 }")
+	fmt.fprintln(f, "")
 
 	fmt.fprintln(f, "Atlas_Glyph :: struct {")
 	fmt.fprintln(f, "\trect:      Rect,")
@@ -1202,29 +1203,31 @@ write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
 		fmt.fprintf(f, "%s_ATLAS_FILENAME :: \"%s\"\n", atlas_name_upper, result.config.output_png_path)
 		fmt.fprintfln(f, "%s_ATLAS_SIZE :: [2]int{{%v, %v}}", atlas_name_upper, cropped_size.x, cropped_size.y)
 
-		if result.config.type == .Glyphs {
-			fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
-			fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n", LETTERS_IN_FONT)
-		}
+		// if result.config.type == .Glyphs {
+		// 	fmt.fprintf(f, "ATLAS_FONT_SIZE :: %v\n", FONT_SIZE)
+		// 	fmt.fprintf(f, "LETTERS_IN_FONT :: \"%s\"\n", LETTERS_IN_FONT)
+		// }
 
-		fmt.fprintfln(
-			f,
-			"%s_SHAPES_TEXTURE_RECT :: Rect{{%v, %v, %v, %v}}",
-			atlas_name_upper,
-			shapes_rect.x,
-			shapes_rect.y,
-			shapes_rect.width,
-			shapes_rect.height,
-		)
-		fmt.fprintfln(
-			f,
-			"%s_SHAPES_TEXTURE_UVS :: [4]f32{{%v, %v, %v, %v}}\n",
-			atlas_name_upper,
-			f32(shapes_rect.x) / f32(cropped_size.x),
-			f32(shapes_rect.y) / f32(cropped_size.y),
-			f32(shapes_rect.x + shapes_rect.width) / f32(cropped_size.x),
-			f32(shapes_rect.y + shapes_rect.height) / f32(cropped_size.y),
-		)
+		if result.config.type != .Glyphs {
+			fmt.fprintfln(
+				f,
+				"%s_SHAPES_TEXTURE_RECT :: Rect{{%v, %v, %v, %v}}",
+				atlas_name_upper,
+				shapes_rect.x,
+				shapes_rect.y,
+				shapes_rect.width,
+				shapes_rect.height,
+			)
+			fmt.fprintfln(
+				f,
+				"%s_SHAPES_TEXTURE_UVS :: [4]f32{{%v, %v, %v, %v}}\n",
+				atlas_name_upper,
+				f32(shapes_rect.x) / f32(cropped_size.x),
+				f32(shapes_rect.y) / f32(cropped_size.y),
+				f32(shapes_rect.x + shapes_rect.width) / f32(cropped_size.x),
+				f32(shapes_rect.y + shapes_rect.height) / f32(cropped_size.y),
+			)
+		}
 	}
 
 	// --- 5. Write Consolidated Maps ---
@@ -1280,6 +1283,67 @@ write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
 	// --- 6. Write Tileset and Glyph Data ---
 	fmt.fprintln(f, "// --- Tilesets and Glyphs ---")
 	for result in results {
+		if len(result.msdf_data.glyphs) > 0 {
+			data := result.msdf_data
+
+			// Atlas Metrics
+			fmt.fprintfln(
+				f,
+				"msdf_atlas_metrics := MSDF_Atlas_Metrics {{ type = %q, distance_range = %v, size = %v, width = %v, height = %v, y_origin = %q }}",
+				data.atlas.type,
+				data.atlas.distance_range,
+				data.atlas.size,
+				data.atlas.width,
+				data.atlas.height,
+				data.atlas.y_origin,
+			)
+
+			// Font Metrics
+			fmt.fprintfln(
+				f,
+				"msdf_font_metrics := MSDF_Font_Metrics {{ em_size = %v, line_height = %v, ascender = %v, descender = %v, underline_y = %v, underline_thickness = %v }}",
+				data.metrics.em_size,
+				data.metrics.line_height,
+				data.metrics.ascender,
+				data.metrics.descender,
+				data.metrics.underline_y,
+				data.metrics.underline_thickness,
+			)
+
+			// Glyphs
+			fmt.fprintln(f, "\nmsdf_glyphs := [?]MSDF_Glyph_Metrics {")
+			for glyph in data.glyphs {
+				fmt.fprint(f, "\t{")
+				fmt.fprintfln(f, " unicode = %v, advance = %v,", glyph.unicode, glyph.advance)
+				pb := glyph.plane_bounds
+				fmt.fprintfln(
+					f,
+					"\t  plane_bounds = MSDF_Bounds{{%v, %v, %v, %v}},",
+					pb.left,
+					pb.bottom,
+					pb.right,
+					pb.top,
+				)
+				ab := glyph.atlas_bounds
+				fmt.fprintfln(
+					f,
+					"\t  atlas_bounds = MSDF_Bounds{{%v, %v, %v, %v}},",
+					ab.left,
+					ab.bottom,
+					ab.right,
+					ab.top,
+				)
+				fmt.fprintln(f, "\t},")
+			}
+			fmt.fprintln(f, "}")
+
+			// Kerning
+			fmt.fprintln(f, "\nmsdf_kerning := [?]MSDF_Kerning_Pair {")
+			for pair in data.kerning {
+				fmt.fprintfln(f, "\t{{%v, %v, %v}},", pair.unicode1, pair.unicode2, pair.advance)
+			}
+			fmt.fprintln(f, "}")
+		}
 		if len(result.tilesets) > 0 {
 			cropped_size := result.cropped_size
 			for t in result.tilesets {
@@ -1321,29 +1385,6 @@ write_consolidated_odin_file :: proc(results: []Atlas_Build_Result) {
 				}
 				fmt.fprintln(f, "}\n")
 			}
-		}
-
-		if len(result.glyphs) > 0 {
-			fmt.fprintln(f, "atlas_glyphs: []Atlas_Glyph = {")
-			for g in result.glyphs {
-				fmt.fprintfln(
-					f,
-					"\t{{ rect = {{%v, %v, %v, %v}}, uvs = {{%v, %v, %v, %v}}, value = %q, offset_x = %v, offset_y = %v, advance_x = %v}},",
-					g.rect.x,
-					g.rect.y,
-					g.rect.width,
-					g.rect.height,
-					f32(g.rect.x) / f32(result.cropped_size.x),
-					f32(g.rect.y) / f32(result.cropped_size.y),
-					f32(g.rect.x + g.rect.width) / f32(result.cropped_size.x),
-					f32(g.rect.y + g.rect.height) / f32(result.cropped_size.y),
-					g.glyph.value,
-					g.glyph.offset.x,
-					g.glyph.offset.y,
-					g.glyph.advance_x,
-				)
-			}
-			fmt.fprintln(f, "}\n")
 		}
 	}
 
