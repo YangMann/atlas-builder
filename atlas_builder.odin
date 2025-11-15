@@ -490,7 +490,6 @@ load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 	document_rect := Rect{0, 0, int(doc.header.width), int(doc.header.height)}
 
 	base_name := asset_name(filename)
-	frame_idx := 0
 	animated := len(doc.frames) > 1
 	skip_writing_main_anim := false
 	indexed := doc.header.color_depth == .Indexed
@@ -530,7 +529,7 @@ load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 		return
 	}
 
-	for f in doc.frames {
+	for f, frame_idx in doc.frames {
 		duration: f32 = f32(f.header.duration) / 1000.0
 
 		cels: [dynamic]^ase.Cel_Chunk
@@ -566,6 +565,16 @@ load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 		}
 
 		if len(cels) == 0 {
+			// This is an empty frame. Create a placeholder texture data.
+			td := Texture_Data {
+				source_size   = {0, 0},
+				pixels_size   = {0, 0},
+				document_size = {int(doc.header.width), int(doc.header.height)},
+				duration      = duration,
+				name          = animated ? fmt.tprint(base_name, frame_idx, sep = "") : base_name,
+				pixels        = nil, // No pixels
+			}
+			append(textures, td)
 			continue
 		}
 
@@ -645,14 +654,13 @@ load_ase_texture_data :: proc(filename: string, textures: ^[dynamic]Texture_Data
 		}
 
 		append(textures, td)
-		frame_idx += 1
 	}
 
-	if animated && frame_idx > 1 && !skip_writing_main_anim {
+	if animated && len(doc.frames) > 1 && !skip_writing_main_anim {
 		a := Animation {
 			name          = base_name,
 			first_texture = fmt.tprint(base_name, 0, sep = ""),
-			last_texture  = fmt.tprint(base_name, frame_idx - 1, sep = ""),
+			last_texture  = fmt.tprint(base_name, len(doc.frames) - 1, sep = ""),
 			document_size = {int(document_rect.width), int(document_rect.height)},
 		}
 
